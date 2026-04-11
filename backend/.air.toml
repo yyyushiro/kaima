@@ -1,0 +1,9 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+    cmd = "go build -o ./kaima ./cmd"
+    bin = "./kaima"
+    delay = 1000
+    include_dir = ["."]
+

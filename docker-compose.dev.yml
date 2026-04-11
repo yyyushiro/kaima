@@ -4,6 +4,8 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: kaima_backend
+    volumes:
+      - ./backend:/app
     restart: always
     ports:
       - "8080:8080"
@@ -12,6 +14,7 @@ services:
       - REDIS_PORT=6379
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
     depends_on:
       db:
         condition: service_healthy
@@ -33,17 +36,16 @@ services:
     networks:
       - kaima-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U myuser -d kaima_database"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 30s
-  
-
   redis:
     image: redis
     volumes:
       - kaima-redis-data:/data
+    restart: always
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -53,6 +55,20 @@ services:
     networks:
       - kaima-network
 
+  frontend:
+    build: 
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "5174:5174"
+    depends_on:
+      - backend
+    networks:
+      - kaima-network
+    
 networks:
   kaima-network:
 
