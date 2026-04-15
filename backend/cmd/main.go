@@ -28,8 +28,8 @@ type UserInfo struct {
 
 func main() {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/auth/google/start", authenticationURIHandler)
-	mux.HandleFunc("/auth/callback/google", getAccessTokenHandler)
+	mux.HandleFunc("/api/auth/google/start", authenticationURIHandler)
+	mux.HandleFunc("/api/auth/callback/google", getAccessTokenHandler)
 
 	http.ListenAndServe(":8080", mux)
 }

@@ -4,7 +4,7 @@ COMPOSE := docker compose -f $(COMPOSE_FILE)
 BACKEND_DIR := backend
 BACKEND_BIN := $(CURDIR)/bin/backend
 
-.PHONY: dev-up dev-build down logs clean ps migrate-up migrate-down backend-build backend-run
+.PHONY: dev-up dev-build down logs clean ps migrate-up migrate-down backend-build backend-run rebuild-frontend
 
 dev-up:
 	$(COMPOSE) up -d
@@ -23,6 +23,10 @@ logs-backend:
 
 logs-frontend:
 	$(COMPOSE) logs -f frontend
+
+rebuild-frontend:
+	$(COMPOSE) rm -sf frontend
+	$(COMPOSE) up -d --build frontend
 
 logs-db:
 	$(COMPOSE) logs -f db
