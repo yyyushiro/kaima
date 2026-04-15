@@ -1,4 +1,7 @@
 .DS_Store
+bin/
 .env
 .envrc
 .cursorignore
+backend/server.*
+backend/tmp

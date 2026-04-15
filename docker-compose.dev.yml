@@ -9,12 +9,17 @@ services:
     restart: always
     ports:
       - "8080:8080"
+      - "8443:8443"
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB}
+      - CLIENT_ID=${CLIENT_ID}
+      - CLIENT_SECRET=${CLIENT_SECRET}
+      - REDIRECT_URI=${REDIRECT_URI}
+      - HMAC_SECRET_KEY=${HMAC_SECRET_KEY}
     depends_on:
       db:
         condition: service_healthy
@@ -63,7 +68,7 @@ services:
       - ./frontend:/app
       - /app/node_modules
     ports:
-      - "5174:5174"
+      - "5173:5173"
     depends_on:
       - backend
     networks:
