@@ -16,10 +16,14 @@ services:
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB}
-      - CLIENT_ID=${CLIENT_ID}
+      - CLIENT_ID=${CLIENT_ID} 
       - CLIENT_SECRET=${CLIENT_SECRET}
       - REDIRECT_URI=${REDIRECT_URI}
       - HMAC_SECRET_KEY=${HMAC_SECRET_KEY}
+      - POSTGRES_URL=${POSTGRES_URL}
+      - JWT_SECRET=${JWT_SECRET}
+      - ACCESS_TOKEN_DURATION=${ACCESS_TOKEN_DURATION}
+      - REFRESH_TOKEN_DURATION=${REFRESH_TOKEN_DURATION}
     depends_on:
       db:
         condition: service_healthy
@@ -51,6 +55,8 @@ services:
     volumes:
       - kaima-redis-data:/data
     restart: always
+    ports:
+      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

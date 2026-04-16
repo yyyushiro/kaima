@@ -5,14 +5,21 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
@@ -21,12 +28,32 @@ var oauthConf, oidcConf = MakeGoogleOAuth2Config()
 
 var secretKey = os.Getenv("HMAC_SECRET_KEY")
 
+var conn *pgx.Conn
+
+var rdb = redis.NewClient(&redis.Options{
+	Addr:     "redis:6379",
+	Password: "",
+	DB:       0,
+	Protocol: 2,
+})
+
+func initDB() {
+	var err error
+	conn, err = pgx.Connect(context.Background(), os.Getenv("POSTGRES_URL"))
+	if err != nil {
+		log.Printf("Unable to connect to database: %v", err)
+		os.Exit(1)
+	}
+}
+
 type UserInfo struct {
 	Email string `json:"email"`
 	Name  string `json:"name"`
 }
 
 func main() {
+	initDB()
+	defer conn.Close(context.Background())
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/auth/google/start", authenticationURIHandler)
 	mux.HandleFunc("/api/auth/callback/google", getAccessTokenHandler)
@@ -45,17 +72,30 @@ func SignCookie(c *http.Cookie) *http.Cookie {
 	return c
 }
 
-func makeSignedCookie(name, value string) *http.Cookie {
+func makeSignedCookie(name, value string, maxAge int) *http.Cookie {
 	c := http.Cookie{
 		Name:     name,
 		Value:    value,
 		Path:     "/",
-		MaxAge:   300,
+		MaxAge:   maxAge,
 		HttpOnly: true,
 		Secure:   false, // implement HTTPS and turn it true later.
 		SameSite: http.SameSiteLaxMode,
 	}
 	return SignCookie(&c)
+}
+
+func makeDeleteCookie(name string) *http.Cookie {
+	c := &http.Cookie{
+		Name:     name,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   false, // implement HTTPS and turn it true later.
+		SameSite: http.SameSiteLaxMode,
+	}
+	return c
 }
 
 // authenticationURIHandler redirects users to google authorization page with making Cookie.
@@ -64,8 +104,8 @@ func authenticationURIHandler(w http.ResponseWriter, r *http.Request) {
 	state := rand.Text()
 	nonce := rand.Text()
 
-	http.SetCookie(w, makeSignedCookie("state", state))
-	http.SetCookie(w, makeSignedCookie("nonce", nonce))
+	http.SetCookie(w, makeSignedCookie("state", state, 300))
+	http.SetCookie(w, makeSignedCookie("nonce", nonce, 300))
 
 	oauthURL := oauthConf.AuthCodeURL(state, oauth2.SetAuthURLParam("nonce", nonce), oauth2.SetAuthURLParam("redirect_uri", os.Getenv("REDIRECT_URI")))
 	http.Redirect(w, r, oauthURL, http.StatusFound)
@@ -119,6 +159,9 @@ func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid session", http.StatusUnauthorized)
 		return
 	}
+
+	stateDeleteCookie := makeDeleteCookie("state")
+	http.SetCookie(w, stateDeleteCookie)
 
 	// Exchange the authorization code with an access token.
 	tok, err := oauthConf.Exchange(context.TODO(), q.Get("code"))
@@ -202,19 +245,88 @@ func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Delete the used nonce.
-	nonceDeleteCookie := &http.Cookie{
-		Name:     "nonce",
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   false, // implement HTTPS and turn it true later.
-		SameSite: http.SameSiteLaxMode,
-	}
+	nonceDeleteCookie := makeDeleteCookie("nonce")
 	http.SetCookie(w, nonceDeleteCookie)
 
+	sub := claims.Sub
+
 	// Print access token and email for testing
-	log.Printf("Email: %s, Sub; %s", email, claims.Sub)
+	log.Printf("Email: %s, Sub; %s", email, sub)
+
+	// register the user if the user is new. Then, get the user's id.
+	var id uuid.UUID
+	err = conn.QueryRow(context.Background(), "INSERT INTO users (google_sub) VALUES ($1) ON CONFLICT (google_sub) DO UPDATE SET google_sub = EXCLUDED.google_sub RETURNING id", sub).Scan(&id)
+	if err != nil {
+		log.Printf("QueryRow failed: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// generate my app's access token (JWT style) using the sub.
+	accessTokenDuration, err := strconv.Atoi(os.Getenv("ACCESS_TOKEN_DURATION"))
+	if err != nil {
+		log.Printf("parsing time duration: %s", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	exp := time.Now().Add(time.Duration(accessTokenDuration) * time.Minute)
+	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256,
+		jwt.MapClaims{
+			"sub": id,
+			"exp": exp.Unix(),
+			"iat": time.Now().Unix(),
+		})
+
+	signedAccessToken, err := accessToken.SignedString([]byte(os.Getenv("JWT_SECRET")))
+	if err != nil {
+		log.Printf("signing jwt: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// create cookie for access_token and refresh token.
+	accessTokenCookie := makeSignedCookie("access_token", signedAccessToken, 900)
+	http.SetCookie(w, accessTokenCookie)
+
+	// generate refresh token.
+	refreshToken, err := generateRefreshToken()
+	if err != nil {
+		log.Printf("generating refresh token: %s", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// store refresh token into Redis and Cookie.
+	refreshTokenDuration, err := strconv.Atoi(os.Getenv("REFRESH_TOKEN_DURATION"))
+	if err != nil {
+		log.Printf("parsing refresh token duration: %s", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	err = rdb.Set(context.Background(), refreshToken, sub, time.Duration(refreshTokenDuration)*time.Hour).Err()
+	if err != nil {
+		log.Printf("storing refresh token into Redis: %s", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	refreshTokenCookie := makeSignedCookie("refresh_token", refreshToken, 604800)
+	http.SetCookie(w, refreshTokenCookie)
+
+	log.Printf("my access token: %s \n my refresh token: %s", signedAccessToken, refreshToken)
+
+	http.Redirect(w, r, "http://localhost:5173/timeline", http.StatusFound)
+}
+
+func generateRefreshToken() (string, error) {
+	b := make([]byte, 32)
+	_, err := rand.Read(b)
+	if err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(b), nil
 }
 
 // MakeGoogleOAuth2Config gets environment variables
