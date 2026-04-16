@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -70,22 +71,15 @@ func authenticationURIHandler(w http.ResponseWriter, r *http.Request) {
 
 func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
 	// Get state cookie.
-	signedStateCookie, err := r.Cookie("state")
+	stateValue, err := GetAndVerifyCookie(r, "state")
 	if err != nil {
-		if err == http.ErrNoCookie {
-			log.Printf("cookie state: %v", err)
+		if errors.Is(err, http.ErrNoCookie) {
+			log.Printf("retrieve cookie: %v", err)
 			http.Error(w, "invalid session", http.StatusUnauthorized)
 			return
 		}
-		log.Printf("cookie state: %v", err)
+		log.Printf("verify cookie: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	stateValue, err := ValidateCookie(signedStateCookie)
-	if err != nil {
-		log.Printf("State Validation: %s", err)
-		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 
@@ -125,8 +119,6 @@ func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	email := userInfo.Email
-
 	// Verify OpenID Connect
 	rawOpenIdToken, ok := tok.Extra("id_token").(string)
 	if !ok {
@@ -158,27 +150,20 @@ func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	signedNonceCookie, err := r.Cookie("nonce")
+	nonceValue, err := GetAndVerifyCookie(r, "nonce")
 	if err != nil {
-		if err == http.ErrNoCookie {
-			log.Printf("cookie nonce: %v", err)
+		if errors.Is(err, http.ErrNoCookie) {
+			log.Printf("retrieve cookie: %v", err)
 			http.Error(w, "invalid session", http.StatusUnauthorized)
 			return
 		}
-		log.Printf("cookie nonce: %v", err)
+		log.Printf("verify cookie: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	nonceValue, err := ValidateCookie(signedNonceCookie)
-	if err != nil {
-		log.Printf("validation of nonce cookie: %s", err)
-		http.Error(w, "invalid session", http.StatusUnauthorized)
-		return
-	}
-
 	if nonceValue != claims.Nonce {
-		log.Println("the nonce is not valid.")
+		log.Printf("the nonce is not valid. Cookie: %s, OpenID: %s", nonceValue, claims.Nonce)
 		http.Error(w, "invalid ID token", http.StatusUnauthorized)
 		return
 	}
@@ -187,8 +172,6 @@ func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, nonceDeleteCookie)
 
 	sub := claims.Sub
-
-	log.Printf("Email: %s, Sub; %s", email, sub)
 
 	// Register the user if the user is new. Then, get the user's id.
 	var id uuid.UUID

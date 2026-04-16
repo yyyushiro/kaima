@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 )
 
@@ -45,12 +46,17 @@ func makeDeleteCookie(name string) *http.Cookie {
 	return c
 }
 
-// ValidateCookie decodes a given signed Cookie with HMAC and validate it.
-func ValidateCookie(signedCookie *http.Cookie) (string, error) {
+// GetAndVerifyCookie verifies the given name's Cookie and return its decoded value.
+func GetAndVerifyCookie(r *http.Request, name string) (string, error) {
+	signedCookie, err := r.Cookie(name)
+	if err != nil {
+		return "", err
+	}
 	hexSize := sha256.Size * 2
+
 	signature, err := hex.DecodeString(signedCookie.Value[:hexSize])
 	if err != nil {
-		return "", errors.New("Failed to Decode")
+		return "", fmt.Errorf("decode signature: %w", err)
 	}
 	value := signedCookie.Value[hexSize:]
 
