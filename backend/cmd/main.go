@@ -2,13 +2,8 @@ package main
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -16,12 +11,10 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
 )
 
 var oauthConf, oidcConf = MakeGoogleOAuth2Config()
@@ -61,43 +54,6 @@ func main() {
 	http.ListenAndServe(":8080", mux)
 }
 
-// SignCookie sets a signature on a given Cookie using HMAC.
-func SignCookie(c *http.Cookie) *http.Cookie {
-	mac := hmac.New(sha256.New, []byte(secretKey))
-	mac.Write([]byte(c.Name))
-	mac.Write([]byte(c.Value))
-	signature := mac.Sum(nil)
-
-	c.Value = hex.EncodeToString(signature) + c.Value
-	return c
-}
-
-func makeSignedCookie(name, value string, maxAge int) *http.Cookie {
-	c := http.Cookie{
-		Name:     name,
-		Value:    value,
-		Path:     "/",
-		MaxAge:   maxAge,
-		HttpOnly: true,
-		Secure:   false, // implement HTTPS and turn it true later.
-		SameSite: http.SameSiteLaxMode,
-	}
-	return SignCookie(&c)
-}
-
-func makeDeleteCookie(name string) *http.Cookie {
-	c := &http.Cookie{
-		Name:     name,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   false, // implement HTTPS and turn it true later.
-		SameSite: http.SameSiteLaxMode,
-	}
-	return c
-}
-
 // authenticationURIHandler redirects users to google authorization page with making Cookie.
 func authenticationURIHandler(w http.ResponseWriter, r *http.Request) {
 	// Add temporary parameters and construct an authentication request to Google.
@@ -110,25 +66,6 @@ func authenticationURIHandler(w http.ResponseWriter, r *http.Request) {
 	oauthURL := oauthConf.AuthCodeURL(state, oauth2.SetAuthURLParam("nonce", nonce), oauth2.SetAuthURLParam("redirect_uri", os.Getenv("REDIRECT_URI")))
 	http.Redirect(w, r, oauthURL, http.StatusFound)
 	log.Println("Redirect to authorization page.")
-}
-
-// ValidateCookie decodes a given signed Cookie with HMAC and validate it.
-func ValidateCookie(signedCookie *http.Cookie) (string, error) {
-	hexSize := sha256.Size * 2
-	signature, err := hex.DecodeString(signedCookie.Value[:hexSize])
-	if err != nil {
-		return "", errors.New("Failed to Decode")
-	}
-	value := signedCookie.Value[hexSize:]
-
-	mac := hmac.New(sha256.New, []byte(secretKey))
-	mac.Write([]byte(signedCookie.Name))
-	mac.Write([]byte(value))
-	expectedSignature := mac.Sum(nil)
-	if !hmac.Equal(signature, expectedSignature) {
-		return "", errors.New("invalid signature")
-	}
-	return value, nil
 }
 
 func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
@@ -163,7 +100,6 @@ func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
 	stateDeleteCookie := makeDeleteCookie("state")
 	http.SetCookie(w, stateDeleteCookie)
 
-	// Exchange the authorization code with an access token.
 	tok, err := oauthConf.Exchange(context.TODO(), q.Get("code"))
 	if err != nil {
 		log.Printf("Exchange Authorization Code: %s", err)
@@ -191,14 +127,18 @@ func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
 
 	email := userInfo.Email
 
+	// Verify OpenID Connect
 	rawOpenIdToken, ok := tok.Extra("id_token").(string)
 	if !ok {
 		http.Error(w, "missing id_token", http.StatusUnauthorized)
 		return
 	}
 
-	// Verify openID Connect.
-	provider, _ := oidc.NewProvider(context.TODO(), "https://accounts.google.com")
+	provider, err := oidc.NewProvider(context.TODO(), "https://accounts.google.com")
+	if err != nil {
+		log.Printf("setting google as a provider: %s", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
 	verifier := provider.Verifier(oidcConf)
 
 	openIdToken, err := verifier.Verify(context.TODO(), rawOpenIdToken)
@@ -218,7 +158,6 @@ func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get the nonce Cookie.
 	signedNonceCookie, err := r.Cookie("nonce")
 	if err != nil {
 		if err == http.ErrNoCookie {
@@ -231,29 +170,27 @@ func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if the cookie is valid.
 	nonceValue, err := ValidateCookie(signedNonceCookie)
 	if err != nil {
-
+		log.Printf("validation of nonce cookie: %s", err)
+		http.Error(w, "invalid session", http.StatusUnauthorized)
+		return
 	}
 
-	// Check if the nonce from Cookie is identical to the one from ID token.
 	if nonceValue != claims.Nonce {
 		log.Println("the nonce is not valid.")
 		http.Error(w, "invalid ID token", http.StatusUnauthorized)
 		return
 	}
 
-	// Delete the used nonce.
 	nonceDeleteCookie := makeDeleteCookie("nonce")
 	http.SetCookie(w, nonceDeleteCookie)
 
 	sub := claims.Sub
 
-	// Print access token and email for testing
 	log.Printf("Email: %s, Sub; %s", email, sub)
 
-	// register the user if the user is new. Then, get the user's id.
+	// Register the user if the user is new. Then, get the user's id.
 	var id uuid.UUID
 	err = conn.QueryRow(context.Background(), "INSERT INTO users (google_sub) VALUES ($1) ON CONFLICT (google_sub) DO UPDATE SET google_sub = EXCLUDED.google_sub RETURNING id", sub).Scan(&id)
 	if err != nil {
@@ -262,34 +199,18 @@ func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// generate my app's access token (JWT style) using the sub.
-	accessTokenDuration, err := strconv.Atoi(os.Getenv("ACCESS_TOKEN_DURATION"))
+	signedAccessToken, err := makeSignedAccessToken(id)
 	if err != nil {
-		log.Printf("parsing time duration: %s", err)
+		log.Printf("making access token: %s", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	exp := time.Now().Add(time.Duration(accessTokenDuration) * time.Minute)
-	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256,
-		jwt.MapClaims{
-			"sub": id,
-			"exp": exp.Unix(),
-			"iat": time.Now().Unix(),
-		})
-
-	signedAccessToken, err := accessToken.SignedString([]byte(os.Getenv("JWT_SECRET")))
-	if err != nil {
-		log.Printf("signing jwt: %v", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	// create cookie for access_token and refresh token.
+	// Make access token Cookie for authorization when the user calls APIs.
 	accessTokenCookie := makeSignedCookie("access_token", signedAccessToken, 900)
 	http.SetCookie(w, accessTokenCookie)
 
-	// generate refresh token.
+	// Store refresh token into Redis and Cookie for getting new access token when expired.
 	refreshToken, err := generateRefreshToken()
 	if err != nil {
 		log.Printf("generating refresh token: %s", err)
@@ -297,7 +218,6 @@ func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// store refresh token into Redis and Cookie.
 	refreshTokenDuration, err := strconv.Atoi(os.Getenv("REFRESH_TOKEN_DURATION"))
 	if err != nil {
 		log.Printf("parsing refresh token duration: %s", err)
@@ -318,35 +238,4 @@ func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("my access token: %s \n my refresh token: %s", signedAccessToken, refreshToken)
 
 	http.Redirect(w, r, "http://localhost:5173/timeline", http.StatusFound)
-}
-
-func generateRefreshToken() (string, error) {
-	b := make([]byte, 32)
-	_, err := rand.Read(b)
-	if err != nil {
-		return "", err
-	}
-	return base64.URLEncoding.EncodeToString(b), nil
-}
-
-// MakeGoogleOAuth2Config gets environment variables
-// and make the configuration of Google OAuth2.0 with the scope and endpoint.
-func MakeGoogleOAuth2Config() (*oauth2.Config, *oidc.Config) {
-
-	clientId := os.Getenv("CLIENT_ID")
-	clientSecret := os.Getenv("CLIENT_SECRET")
-	redirectUri := os.Getenv("REDIRECT_URI")
-
-	conf := &oauth2.Config{
-		ClientID:     clientId,
-		ClientSecret: clientSecret,
-		RedirectURL:  redirectUri,
-		Scopes: []string{
-			"https://www.googleapis.com/auth/userinfo.email",
-			"https://www.googleapis.com/auth/userinfo.profile",
-			"openid",
-		},
-		Endpoint: google.Endpoint,
-	}
-	return conf, &oidc.Config{ClientID: clientId}
 }
