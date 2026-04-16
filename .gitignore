@@ -7,3 +7,4 @@ backend/server.*
 backend/tmp
 backend/kaima
 .memo
+cookies.txt
