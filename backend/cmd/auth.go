@@ -69,7 +69,7 @@ func verifyAccessTokenJWT(tokenString string, secret []byte) (*accessTokenClaims
 
 // You can expand this struct if you want to get more information from authorization later.
 type AuthResult struct {
-	sub                  uuid.UUID
+	Sub                  uuid.UUID
 	newAccessTokenCookie *http.Cookie
 }
 
@@ -92,7 +92,7 @@ func RequireAuth(r *http.Request) (*AuthResult, error) {
 
 	// verify exp this is happy route
 	if accessTokenClaims.ExpiresAt.Time.Unix() > time.Now().Unix() {
-		return &AuthResult{sub: subUuid, newAccessTokenCookie: nil}, nil
+		return &AuthResult{Sub: subUuid, newAccessTokenCookie: nil}, nil
 	}
 
 	// if exp is invalid, then check refreshtoken.
@@ -120,7 +120,7 @@ func RequireAuth(r *http.Request) (*AuthResult, error) {
 
 	// return the new access token cookie.
 	return &AuthResult{
-		sub:                  subUuid,
+		Sub:                  subUuid,
 		newAccessTokenCookie: makeSignedCookie("access_token", newSignedAccessToken, 900),
 	}, nil
 }

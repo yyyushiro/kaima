@@ -51,6 +51,9 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/auth/google/start", authenticationURIHandler)
 	mux.HandleFunc("/api/auth/callback/google", getAccessTokenHandler)
+	mux.HandleFunc("POST /api/posts", makePostHandler)
+	mux.HandleFunc("GET /api/user/me/posts", getMyPostsHandler)
+	mux.HandleFunc("DELETE /api/posts/{id}", deletePostHandler)
 
 	http.ListenAndServe(":8080", mux)
 }
@@ -221,4 +224,106 @@ func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("my access token: %s \n my refresh token: %s", signedAccessToken, refreshToken)
 
 	http.Redirect(w, r, "http://localhost:5173/timeline", http.StatusFound)
+}
+
+func getMyPostsHandler(w http.ResponseWriter, r *http.Request) {
+	result, err := RequireAuth(r)
+	if err != nil {
+		log.Printf("Authorization: %s", err)
+		http.Error(w, "invalid session", http.StatusUnauthorized)
+		return
+	}
+	posts, err := getMyPosts(result.Sub)
+	if err != nil {
+		log.Printf("Getting current user's posts: %s", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	body, err := json.Marshal(posts)
+	if err != nil {
+		log.Printf("encode json: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(body); err != nil {
+		log.Printf("write response: %v", err)
+	}
+}
+
+type makePostRequest struct {
+	Body string `json:"body"`
+}
+
+func makePostHandler(w http.ResponseWriter, r *http.Request) {
+	result, err := RequireAuth(r)
+	if err != nil {
+		log.Printf("Authorization: %s", err)
+		http.Error(w, "invalid session", http.StatusUnauthorized)
+		return
+	}
+	var req makePostRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("decode body: %v", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.Body == "" {
+		http.Error(w, "body required", http.StatusBadRequest)
+		return
+	}
+	post, err := addPost(result.Sub, req.Body)
+	if err != nil {
+		log.Printf("creating post: %s", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	body, err := json.Marshal(post)
+	if err != nil {
+		log.Printf("encode json: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	if _, err := w.Write(body); err != nil {
+		log.Printf("write response: %v", err)
+	}
+}
+
+func deletePostHandler(w http.ResponseWriter, r *http.Request) {
+	result, err := RequireAuth(r)
+	if err != nil {
+		log.Printf("Authorization: %s", err)
+		http.Error(w, "invalid session", http.StatusUnauthorized)
+		return
+	}
+	idStr := r.PathValue("id")
+	postID, err := uuid.Parse(idStr)
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	post, err := deletePost(result.Sub, postID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		log.Printf("deleting post: %s", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	body, err := json.Marshal(post)
+	if err != nil {
+		log.Printf("encode json: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(body); err != nil {
+		log.Printf("write response: %v", err)
+	}
 }
