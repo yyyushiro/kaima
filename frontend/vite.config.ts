@@ -6,7 +6,8 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      '/api': 'http://backend:8080'
-    }
+      // Use '/api/' so '/apis/...' (source folder) is not mistaken for API routes.
+      '/api/': 'http://backend:8080',
+    },
   }
 })
