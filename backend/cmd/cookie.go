@@ -7,7 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 )
+
+func cookieSecure() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("COOKIE_SECURE")))
+	return v == "true" || v == "1"
+}
 
 // SignCookie sets a signature on a given Cookie using HMAC.
 func SignCookie(c *http.Cookie) *http.Cookie {
@@ -27,7 +34,7 @@ func makeSignedCookie(name, value string, maxAge int) *http.Cookie {
 		Path:     "/",
 		MaxAge:   maxAge,
 		HttpOnly: true,
-		Secure:   false, // implement HTTPS and turn it true later.
+		Secure:   cookieSecure(),
 		SameSite: http.SameSiteLaxMode,
 	}
 	return SignCookie(&c)
@@ -40,7 +47,7 @@ func makeDeleteCookie(name string) *http.Cookie {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   false, // implement HTTPS and turn it true later.
+		Secure:   cookieSecure(),
 		SameSite: http.SameSiteLaxMode,
 	}
 	return c

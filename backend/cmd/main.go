@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -24,12 +25,28 @@ var secretKey = os.Getenv("HMAC_SECRET_KEY")
 
 var conn *pgx.Conn
 
-var rdb = redis.NewClient(&redis.Options{
-	Addr:     "redis:6379",
-	Password: "",
-	DB:       0,
-	Protocol: 2,
-})
+var rdb *redis.Client
+
+func initRedis() {
+	addr := strings.TrimSpace(os.Getenv("REDIS_ADDR"))
+	if addr == "" {
+		host := strings.TrimSpace(os.Getenv("REDIS_HOST"))
+		port := strings.TrimSpace(os.Getenv("REDIS_PORT"))
+		if host != "" && port != "" {
+			addr = host + ":" + port
+		}
+	}
+	if addr == "" {
+		addr = "redis:6379"
+	}
+	opts := &redis.Options{
+		Addr:     addr,
+		Password: os.Getenv("REDIS_PASSWORD"),
+		DB:       0,
+		Protocol: 2,
+	}
+	rdb = redis.NewClient(opts)
+}
 
 func initDB() {
 	var err error
@@ -48,14 +65,30 @@ type UserInfo struct {
 func main() {
 	initDB()
 	defer conn.Close(context.Background())
+	initRedis()
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/auth/google/start", authenticationURIHandler)
-	mux.HandleFunc("/api/auth/callback/google", getAccessTokenHandler)
+	mux.HandleFunc("GET /api/auth/google/start", authenticationURIHandler)
+	mux.HandleFunc("GET /api/auth/callback/google", getAccessTokenHandler)
 	mux.HandleFunc("POST /api/posts", makePostHandler)
 	mux.HandleFunc("GET /api/user/me/posts", getMyPostsHandler)
 	mux.HandleFunc("DELETE /api/posts/{id}", deletePostHandler)
 
-	http.ListenAndServe(":8080", mux)
+	if dir := strings.TrimSpace(os.Getenv("WEB_DIST_DIR")); dir != "" {
+		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+			h := spaHandler(dir)
+			mux.Handle("GET /{path...}", h)
+		}
+	}
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Printf("listening on :%s", port)
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
+		log.Fatal(err)
+	}
 }
 
 // authenticationURIHandler redirects users to google authorization page with making Cookie.
@@ -223,7 +256,12 @@ func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("my access token: %s \n my refresh token: %s", signedAccessToken, refreshToken)
 
-	http.Redirect(w, r, "http://localhost:5173/timeline", http.StatusFound)
+	base := strings.TrimSpace(os.Getenv("APP_PUBLIC_URL"))
+	base = strings.TrimSuffix(base, "/")
+	if base == "" {
+		base = "http://localhost:5173"
+	}
+	http.Redirect(w, r, base+"/timeline", http.StatusFound)
 }
 
 func getMyPostsHandler(w http.ResponseWriter, r *http.Request) {
@@ -289,7 +327,9 @@ func makePostHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 	if _, err := w.Write(body); err != nil {
 		log.Printf("write response: %v", err)
+		return
 	}
+	log.Printf("made post successfully: %s", req.Body)
 }
 
 func deletePostHandler(w http.ResponseWriter, r *http.Request) {

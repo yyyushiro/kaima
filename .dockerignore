@@ -1,0 +1,7 @@
+.git
+frontend/node_modules
+backend/tmp
+backend/kaima
+backend/server
+**/.env
+**/.env.*

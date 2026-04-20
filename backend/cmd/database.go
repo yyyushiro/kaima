@@ -61,5 +61,3 @@ func getMyPosts(userId uuid.UUID) ([]Post, error) {
 	}
 	return posts, nil
 }
-
-func addLike() {}
