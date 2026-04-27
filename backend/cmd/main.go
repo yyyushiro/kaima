@@ -12,67 +12,45 @@ import (
 	"strings"
 	"time"
 
-	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/redis/go-redis/v9"
 	"golang.org/x/oauth2"
 )
 
-var oauthConf, oidcConf = MakeGoogleOAuth2Config()
-
-var secretKey = os.Getenv("HMAC_SECRET_KEY")
-
-var conn *pgx.Conn
-
-var rdb *redis.Client
-
-func initRedis() {
-	addr := strings.TrimSpace(os.Getenv("REDIS_ADDR"))
-	if addr == "" {
-		host := strings.TrimSpace(os.Getenv("REDIS_HOST"))
-		port := strings.TrimSpace(os.Getenv("REDIS_PORT"))
-		if host != "" && port != "" {
-			addr = host + ":" + port
-		}
-	}
-	if addr == "" {
-		addr = "redis:6379"
-	}
-	opts := &redis.Options{
-		Addr:     addr,
-		Password: os.Getenv("REDIS_PASSWORD"),
-		DB:       0,
-		Protocol: 2,
-	}
-	rdb = redis.NewClient(opts)
-}
-
-func initDB() {
-	var err error
-	conn, err = pgx.Connect(context.Background(), os.Getenv("POSTGRES_URL"))
-	if err != nil {
-		log.Printf("Unable to connect to database: %v", err)
-		os.Exit(1)
-	}
-}
-
-type UserInfo struct {
-	Email string `json:"email"`
-	Name  string `json:"name"`
-}
-
 func main() {
-	initDB()
-	defer conn.Close(context.Background())
-	initRedis()
+	// Initialize App struct.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// defer cancel() makes sure the memory of ctx is released before main() ends.
+	defer cancel()
+
+	pool, err := connectDB()
+	if err != nil {
+		log.Fatalf("failed to connect to database: %v", err)
+	}
+
+	rdb, err := newRedisClient()
+	if err != nil {
+		log.Fatalf("failed to connect to Redis: %v", err)
+	}
+
+	oauth2Config, oidcVerifier, err := setUpOAuth2AndOIDC(ctx)
+	if err != nil {
+		log.Fatalf("failed to configure OAuth2 and OIDC: %v", err)
+	}
+
+	app := &App{
+		Pool:         pool,
+		Rdb:          rdb,
+		OAuth2Conf:   oauth2Config,
+		OIDCVerifier: oidcVerifier,
+	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/auth/google/start", authenticationURIHandler)
-	mux.HandleFunc("GET /api/auth/callback/google", getAccessTokenHandler)
-	mux.HandleFunc("POST /api/posts", makePostHandler)
-	mux.HandleFunc("GET /api/user/me/posts", getMyPostsHandler)
-	mux.HandleFunc("DELETE /api/posts/{id}", deletePostHandler)
+	mux.HandleFunc("GET /api/auth/google/start", app.authenticationURIHandler)
+	mux.HandleFunc("GET /api/auth/callback/google", app.getAccessTokenHandler)
+	mux.HandleFunc("POST /api/posts", app.makePostHandler)
+	mux.HandleFunc("GET /api/user/me/posts", app.getMyPostsHandler)
+	mux.HandleFunc("DELETE /api/posts/{id}", app.deletePostHandler)
 
 	if dir := strings.TrimSpace(os.Getenv("WEB_DIST_DIR")); dir != "" {
 		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
@@ -92,84 +70,56 @@ func main() {
 }
 
 // authenticationURIHandler redirects users to google authorization page with making Cookie.
-func authenticationURIHandler(w http.ResponseWriter, r *http.Request) {
+func (a *App) authenticationURIHandler(w http.ResponseWriter, r *http.Request) {
 	// Add temporary parameters and construct an authentication request to Google.
 	state := rand.Text()
 	nonce := rand.Text()
 
+	// Set state and nonce cookies to check validity of the access token and OpenID later.
 	http.SetCookie(w, makeSignedCookie("state", state, 300))
 	http.SetCookie(w, makeSignedCookie("nonce", nonce, 300))
 
-	oauthURL := oauthConf.AuthCodeURL(state, oauth2.SetAuthURLParam("nonce", nonce), oauth2.SetAuthURLParam("redirect_uri", os.Getenv("REDIRECT_URI")))
+	oauthURL := a.OAuth2Conf.AuthCodeURL(state, oauth2.SetAuthURLParam("nonce", nonce), oauth2.SetAuthURLParam("redirect_uri", os.Getenv("REDIRECT_URI")))
 	http.Redirect(w, r, oauthURL, http.StatusFound)
-	log.Println("Redirect to authorization page.")
 }
 
-func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
-	// Get state cookie.
-	stateValue, err := GetAndVerifyCookie(r, "state")
+// getAccessTokenHandler takes the redirect URI, then gets the access token and openID.
+func (a *App) getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
+	stateValue, err := getAndVerifyCookie(r, "state")
 	if err != nil {
 		if errors.Is(err, http.ErrNoCookie) {
 			log.Printf("retrieve cookie: %v", err)
 			http.Error(w, "invalid session", http.StatusUnauthorized)
-			return
 		}
 		log.Printf("verify cookie: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	// Check if the state from Cookie is the same as the one from URL.
-	q := r.URL.Query()
-	if q.Get("state") != stateValue {
+	if r.URL.Query().Get("state") != stateValue {
 		log.Println("the state is not identical")
 		http.Error(w, "invalid session", http.StatusUnauthorized)
 		return
 	}
 
+	// Makes sure this state is not reused by attackers.
 	stateDeleteCookie := makeDeleteCookie("state")
 	http.SetCookie(w, stateDeleteCookie)
 
-	tok, err := oauthConf.Exchange(context.TODO(), q.Get("code"))
+	tok, err := a.OAuth2Conf.Exchange(context.TODO(), r.URL.Query().Get("code"))
 	if err != nil {
 		log.Printf("Exchange Authorization Code: %s", err)
 		http.Error(w, "invalid session", http.StatusUnauthorized)
 		return
 	}
 
-	// Get private information within the scopes.
-	client := oauthConf.Client(context.TODO(), tok)
-
-	resp, err := client.Get("https://www.googleapis.com/oauth2/v3/userinfo")
-	if err != nil {
-		log.Printf("getting userinfo: %v", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	defer resp.Body.Close()
-
-	var userInfo UserInfo
-	if err := json.NewDecoder(resp.Body).Decode(&userInfo); err != nil {
-		log.Printf("getting userinfo: %v", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	// Verify OpenID Connect
 	rawOpenIdToken, ok := tok.Extra("id_token").(string)
 	if !ok {
 		http.Error(w, "missing id_token", http.StatusUnauthorized)
 		return
 	}
 
-	provider, err := oidc.NewProvider(context.TODO(), "https://accounts.google.com")
-	if err != nil {
-		log.Printf("setting google as a provider: %s", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-	}
-	verifier := provider.Verifier(oidcConf)
-
-	openIdToken, err := verifier.Verify(context.TODO(), rawOpenIdToken)
+	openIdToken, err := a.OIDCVerifier.Verify(r.Context(), rawOpenIdToken)
 	if err != nil {
 		http.Error(w, "invalid OpenID Token", http.StatusUnauthorized)
 		return
@@ -186,7 +136,7 @@ func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nonceValue, err := GetAndVerifyCookie(r, "nonce")
+	nonceValue, err := getAndVerifyCookie(r, "nonce")
 	if err != nil {
 		if errors.Is(err, http.ErrNoCookie) {
 			log.Printf("retrieve cookie: %v", err)
@@ -204,28 +154,32 @@ func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Make sure the attackers send the app OpneID token with the same nonce and it passes.
 	nonceDeleteCookie := makeDeleteCookie("nonce")
 	http.SetCookie(w, nonceDeleteCookie)
 
 	sub := claims.Sub
 
-	// Register the user if the user is new. Then, get the user's id.
-	var id uuid.UUID
-	err = conn.QueryRow(context.Background(), "INSERT INTO users (google_sub) VALUES ($1) ON CONFLICT (google_sub) DO UPDATE SET google_sub = EXCLUDED.google_sub RETURNING id", sub).Scan(&id)
+	// Register the user if the user is new. Then, get the user's userId.
+	var userId uuid.UUID
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	err = a.Pool.QueryRow(ctx, "INSERT INTO users (google_sub) VALUES ($1) ON CONFLICT (google_sub) DO UPDATE SET google_sub = EXCLUDED.google_sub RETURNING id", sub).Scan(&userId)
 	if err != nil {
 		log.Printf("QueryRow failed: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	signedAccessToken, err := makeSignedAccessToken(id)
+	// Avoid attacker's changing JWT.
+	signedAccessToken, err := makeSignedAccessToken(userId)
 	if err != nil {
 		log.Printf("making access token: %s", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	// Make access token Cookie for authorization when the user calls APIs.
+	// This cookie is needed for authorization of user in each request.
 	accessTokenCookie := makeSignedCookie("access_token", signedAccessToken, 900)
 	http.SetCookie(w, accessTokenCookie)
 
@@ -243,8 +197,9 @@ func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-
-	err = rdb.Set(context.Background(), refreshToken, sub, time.Duration(refreshTokenDuration)*time.Hour).Err()
+	ctx, cancel = context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	err = a.Rdb.Set(ctx, refreshToken, sub, time.Duration(refreshTokenDuration)*time.Hour).Err()
 	if err != nil {
 		log.Printf("storing refresh token into Redis: %s", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -264,14 +219,17 @@ func getAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, base+"/timeline", http.StatusFound)
 }
 
-func getMyPostsHandler(w http.ResponseWriter, r *http.Request) {
-	result, err := RequireAuth(r)
+func (a *App) getMyPostsHandler(w http.ResponseWriter, r *http.Request) {
+	result, err := RequireAuth(r, a.Rdb)
 	if err != nil {
 		log.Printf("Authorization: %s", err)
 		http.Error(w, "invalid session", http.StatusUnauthorized)
 		return
 	}
-	posts, err := getMyPosts(result.Sub)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	posts, err := getMyPosts(result.Sub, a.Pool, ctx)
 	if err != nil {
 		log.Printf("Getting current user's posts: %s", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -294,8 +252,8 @@ type makePostRequest struct {
 	Body string `json:"body"`
 }
 
-func makePostHandler(w http.ResponseWriter, r *http.Request) {
-	result, err := RequireAuth(r)
+func (a *App) makePostHandler(w http.ResponseWriter, r *http.Request) {
+	result, err := RequireAuth(r, a.Rdb)
 	if err != nil {
 		log.Printf("Authorization: %s", err)
 		http.Error(w, "invalid session", http.StatusUnauthorized)
@@ -311,7 +269,10 @@ func makePostHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "body required", http.StatusBadRequest)
 		return
 	}
-	post, err := addPost(result.Sub, req.Body)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	post, err := addPost(result.Sub, req.Body, a.Pool, ctx)
 	if err != nil {
 		log.Printf("creating post: %s", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -332,8 +293,8 @@ func makePostHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("made post successfully: %s", req.Body)
 }
 
-func deletePostHandler(w http.ResponseWriter, r *http.Request) {
-	result, err := RequireAuth(r)
+func (a *App) deletePostHandler(w http.ResponseWriter, r *http.Request) {
+	result, err := RequireAuth(r, a.Rdb)
 	if err != nil {
 		log.Printf("Authorization: %s", err)
 		http.Error(w, "invalid session", http.StatusUnauthorized)
@@ -345,7 +306,10 @@ func deletePostHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	post, err := deletePost(result.Sub, postID)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	post, err := deletePost(result.Sub, postID, a.Pool, ctx)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			http.Error(w, "not found", http.StatusNotFound)

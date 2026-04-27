@@ -18,7 +18,7 @@ func cookieSecure() bool {
 
 // SignCookie sets a signature on a given Cookie using HMAC.
 func SignCookie(c *http.Cookie) *http.Cookie {
-	mac := hmac.New(sha256.New, []byte(secretKey))
+	mac := hmac.New(sha256.New, []byte(os.Getenv("HMAC_SECRET_KEY")))
 	mac.Write([]byte(c.Name))
 	mac.Write([]byte(c.Value))
 	signature := mac.Sum(nil)
@@ -27,6 +27,7 @@ func SignCookie(c *http.Cookie) *http.Cookie {
 	return c
 }
 
+// makeSignedCookie makes a HMAC-signed cookie with the given name, value, and maxAge.
 func makeSignedCookie(name, value string, maxAge int) *http.Cookie {
 	c := http.Cookie{
 		Name:     name,
@@ -40,12 +41,13 @@ func makeSignedCookie(name, value string, maxAge int) *http.Cookie {
 	return SignCookie(&c)
 }
 
+// makeDeleteCookie deletes cookie with the given name.
 func makeDeleteCookie(name string) *http.Cookie {
 	c := &http.Cookie{
 		Name:     name,
 		Value:    "",
 		Path:     "/",
-		MaxAge:   -1,
+		MaxAge:   -1, // setting negative number here deletes the cookie with the given name.
 		HttpOnly: true,
 		Secure:   cookieSecure(),
 		SameSite: http.SameSiteLaxMode,
@@ -53,8 +55,8 @@ func makeDeleteCookie(name string) *http.Cookie {
 	return c
 }
 
-// GetAndVerifyCookie verifies the given name's Cookie and return its decoded value.
-func GetAndVerifyCookie(r *http.Request, name string) (string, error) {
+// getAndVerifyCookie verifies the given name's Cookie and return its decoded value.
+func getAndVerifyCookie(r *http.Request, name string) (string, error) {
 	signedCookie, err := r.Cookie(name)
 	if err != nil {
 		return "", err
@@ -67,7 +69,7 @@ func GetAndVerifyCookie(r *http.Request, name string) (string, error) {
 	}
 	value := signedCookie.Value[hexSize:]
 
-	mac := hmac.New(sha256.New, []byte(secretKey))
+	mac := hmac.New(sha256.New, []byte(os.Getenv("HMAC_SECRET_KEY")))
 	mac.Write([]byte(signedCookie.Name))
 	mac.Write([]byte(value))
 	expectedSignature := mac.Sum(nil)

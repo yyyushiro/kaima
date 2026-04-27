@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Post struct {
@@ -15,9 +16,9 @@ type Post struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-func addPost(sub uuid.UUID, body string) (*Post, error) {
+func addPost(sub uuid.UUID, body string, pool *pgxpool.Pool, ctx context.Context) (*Post, error) {
 	var post Post
-	err := conn.QueryRow(context.Background(),
+	err := pool.QueryRow(ctx,
 		`INSERT INTO posts (user_id, body) VALUES ($1, $2)
      RETURNING id, user_id, body, created_at`,
 		sub, body,
@@ -28,9 +29,9 @@ func addPost(sub uuid.UUID, body string) (*Post, error) {
 	return &post, nil
 }
 
-func deletePost(userId, postId uuid.UUID) (*Post, error) {
+func deletePost(userId, postId uuid.UUID, pool *pgxpool.Pool, ctx context.Context) (*Post, error) {
 	var post Post
-	err := conn.QueryRow(context.Background(),
+	err := pool.QueryRow(ctx,
 		`DELETE FROM posts WHERE id = $1 AND user_id = $2
 		RETURNING id, user_id, body, created_at`,
 		postId, userId,
@@ -41,8 +42,8 @@ func deletePost(userId, postId uuid.UUID) (*Post, error) {
 	return &post, nil
 }
 
-func getMyPosts(userId uuid.UUID) ([]Post, error) {
-	rows, err := conn.Query(context.Background(), `SELECT id, body FROM posts WHERE user_id = $1`, userId)
+func getMyPosts(userId uuid.UUID, pool *pgxpool.Pool, ctx context.Context) ([]Post, error) {
+	rows, err := pool.Query(ctx, `SELECT id, body FROM posts WHERE user_id = $1`, userId)
 	if err != nil {
 		return nil, fmt.Errorf("Getting post rows: %w", err)
 	}

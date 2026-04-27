@@ -12,8 +12,10 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 )
 
+// generateRefreshToken generates a random 32-byte base64 token for a refresh token.
 func generateRefreshToken() (string, error) {
 	b := make([]byte, 32)
 	_, err := rand.Read(b)
@@ -23,8 +25,8 @@ func generateRefreshToken() (string, error) {
 	return base64.URLEncoding.EncodeToString(b), nil
 }
 
+// makeSignedAccessToken generates generates JWT with the given sub.
 func makeSignedAccessToken(sub uuid.UUID) (string, error) {
-	// Generate my app's access token (JWT style) using the sub.
 	accessTokenDuration, err := strconv.Atoi(os.Getenv("ACCESS_TOKEN_DURATION"))
 	if err != nil {
 		return "", err
@@ -50,6 +52,7 @@ type accessTokenClaims struct {
 	jwt.RegisteredClaims
 }
 
+// verifyAccessTokenJWT verifies the given JWT and decode it.
 func verifyAccessTokenJWT(tokenString string, secret []byte) (*accessTokenClaims, error) {
 	var claims accessTokenClaims
 	tok, err := jwt.ParseWithClaims(tokenString, &claims, func(t *jwt.Token) (interface{}, error) {
@@ -74,12 +77,12 @@ type AuthResult struct {
 }
 
 // RequireAuth is used in every API call and verifies the user's access token.
-func RequireAuth(r *http.Request) (*AuthResult, error) {
-	accessToken, err := GetAndVerifyCookie(r, "access_token")
+func RequireAuth(r *http.Request, rdb *redis.Client) (*AuthResult, error) {
+	accessToken, err := getAndVerifyCookie(r, "access_token")
 	if err != nil {
 		return nil, fmt.Errorf("Verifying access token Cookie: %w", err)
 	}
-	// verify accesstoken (jwt)
+
 	accessTokenClaims, err := verifyAccessTokenJWT(accessToken, []byte(os.Getenv("JWT_SECRET")))
 	if err != nil {
 		return nil, fmt.Errorf("Verifying access token JWT: %w", err)
@@ -96,12 +99,12 @@ func RequireAuth(r *http.Request) (*AuthResult, error) {
 	}
 
 	// if exp is invalid, then check refreshtoken.
-	refreshToken, err := GetAndVerifyCookie(r, "refresh_token")
+	refreshToken, err := getAndVerifyCookie(r, "refresh_token")
 	if err != nil {
 		return nil, fmt.Errorf("Verifying refresh token Cookie: %w", err)
 	}
 
-	// get sub by redis and refreshtoken if not found, then expired.
+	// get sub by redis and refreshtoken. If it is not found, then expired.
 	subStr, err := rdb.Get(context.Background(), refreshToken).Result()
 	if err != nil {
 		return nil, fmt.Errorf("Getting sub from redis: %w", err)
