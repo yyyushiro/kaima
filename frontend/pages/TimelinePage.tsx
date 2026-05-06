@@ -1,12 +1,16 @@
 import { useEffect, useState } from "react"
 import { Link, useNavigate } from "react-router-dom"
-import { getMyPosts, type Post } from "../apis/API.ts"
+import { getMyPosts, likePost, unlikePost, type Post } from "../apis/API.ts"
 
 export default function TimeLinePage() {
     const navigate = useNavigate()
     const [posts, setPosts] = useState<Post[]>([])
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
+    const [pendingLikePostId, setPendingLikePostId] = useState<string | null>(
+        null,
+    )
+    const [likeToggleError, setLikeToggleError] = useState<string | null>(null)
 
     useEffect(() => {
         let cancelled = false
@@ -34,6 +38,32 @@ export default function TimeLinePage() {
             cancelled = true
         }
     }, [])
+
+    async function toggleLike(post: Post) {
+        if (pendingLikePostId !== null) return
+        setLikeToggleError(null)
+        setPendingLikePostId(post.id)
+        try {
+            if (post.liked_by_me) {
+                await unlikePost(post.id)
+            } else {
+                await likePost(post.id)
+            }
+            setPosts((prev) =>
+                prev.map((p) =>
+                    p.id === post.id
+                        ? { ...p, liked_by_me: !p.liked_by_me }
+                        : p,
+                ),
+            )
+        } catch (err: unknown) {
+            const message =
+                err instanceof Error ? err.message : "Could not update like"
+            setLikeToggleError(message)
+        } finally {
+            setPendingLikePostId(null)
+        }
+    }
 
     return (
         <div>
@@ -64,11 +94,51 @@ export default function TimeLinePage() {
                 (posts.length === 0 ? (
                     <p>No posts yet.</p>
                 ) : (
-                    <ul>
-                        {posts.map((post) => (
-                            <li key={post.id}>{post.body}</li>
-                        ))}
-                    </ul>
+                    <>
+                        {likeToggleError && (
+                            <p role="alert">{likeToggleError}</p>
+                        )}
+                        <ul>
+                            {posts.map((post) => {
+                                const busy = pendingLikePostId === post.id
+                                const liked = post.liked_by_me
+                                return (
+                                    <li key={post.id}>
+                                        <span>{post.body}</span>{" "}
+                                        <button
+                                            type="button"
+                                            disabled={busy}
+                                            aria-pressed={liked}
+                                            aria-label={
+                                                liked ? "Unlike" : "Like"
+                                            }
+                                            onClick={() => toggleLike(post)}
+                                            style={{
+                                                color: liked
+                                                    ? "#c62828"
+                                                    : "inherit",
+                                                background: liked
+                                                    ? "rgba(198, 40, 40, 0.12)"
+                                                    : undefined,
+                                                border: "1px solid",
+                                                borderColor: liked
+                                                    ? "#c62828"
+                                                    : "#ccc",
+                                                borderRadius: 4,
+                                                cursor: busy
+                                                    ? "wait"
+                                                    : "pointer",
+                                                lineHeight: 1.2,
+                                                padding: "2px 8px",
+                                            }}
+                                        >
+                                            ♥
+                                        </button>
+                                    </li>
+                                )
+                            })}
+                        </ul>
+                    </>
                 ))}
         </div>
     )

@@ -51,6 +51,8 @@ func main() {
 	mux.HandleFunc("POST /api/posts", app.makePostHandler)
 	mux.HandleFunc("GET /api/user/me/posts", app.getMyPostsHandler)
 	mux.HandleFunc("DELETE /api/posts/{id}", app.deletePostHandler)
+	mux.HandleFunc("POST /api/posts/{id}/likes", app.likePostHandler)
+	mux.HandleFunc("DELETE /api/posts/{id}/likes", app.undoLikePostHandler)
 
 	if dir := strings.TrimSpace(os.Getenv("WEB_DIST_DIR")); dir != "" {
 		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
@@ -229,7 +231,7 @@ func (a *App) getMyPostsHandler(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	posts, err := getMyPosts(result.Sub, a.Pool, ctx)
+	posts, err := GetMyPosts(result.Sub, a.Pool, ctx)
 	if err != nil {
 		log.Printf("Getting current user's posts: %s", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -272,7 +274,7 @@ func (a *App) makePostHandler(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	post, err := addPost(result.Sub, req.Body, a.Pool, ctx)
+	post, err := AddPost(result.Sub, req.Body, a.Pool, ctx)
 	if err != nil {
 		log.Printf("creating post: %s", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -309,7 +311,8 @@ func (a *App) deletePostHandler(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	post, err := deletePost(result.Sub, postID, a.Pool, ctx)
+
+	post, err := DeletePost(result.Sub, postID, a.Pool, ctx)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -319,7 +322,85 @@ func (a *App) deletePostHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+
 	body, err := json.Marshal(post)
+	if err != nil {
+		log.Printf("encode json: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(body); err != nil {
+		log.Printf("write response: %v", err)
+	}
+}
+
+func (a *App) likePostHandler(w http.ResponseWriter, r *http.Request) {
+	result, err := RequireAuth(r, a.Rdb)
+	if err != nil {
+		log.Printf("Authorization: %s", err)
+		http.Error(w, "invalid session", http.StatusUnauthorized)
+		return
+	}
+
+	idStr := r.PathValue("id")
+	postID, err := uuid.Parse(idStr)
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	like, err := LikePost(result.Sub, postID, a.Pool, ctx)
+	if err != nil {
+		log.Printf("Liked a post: %s", err)
+		http.Error(w, "faied to like a post", http.StatusInternalServerError)
+		return
+	}
+
+	body, err := json.Marshal(like)
+	if err != nil {
+		log.Printf("encode json: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	if _, err := w.Write(body); err != nil {
+		log.Printf("write response: %v", err)
+	}
+}
+
+func (a *App) undoLikePostHandler(w http.ResponseWriter, r *http.Request) {
+	result, err := RequireAuth(r, a.Rdb)
+	if err != nil {
+		log.Printf("Authorization: %s", err)
+		http.Error(w, "invalid session", http.StatusUnauthorized)
+		return
+	}
+
+	idStr := r.PathValue("id")
+	postID, err := uuid.Parse(idStr)
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	like, err := UndoLikePost(result.Sub, postID, a.Pool, ctx)
+	if err != nil {
+		log.Printf("Undid a like: %s", err)
+		http.Error(w, "faied to undo a like", http.StatusInternalServerError)
+		return
+	}
+
+	body, err := json.Marshal(like)
 	if err != nil {
 		log.Printf("encode json: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
